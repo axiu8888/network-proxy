@@ -6,10 +6,11 @@ import com.benefitj.netty.log.Log4jNettyLogger;
 import com.benefitj.netty.log.NettyLogger;
 import com.benefitj.netty.server.TcpNettyServer;
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.*;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelInitializer;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.handler.logging.LogLevel;
-import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
@@ -125,10 +126,8 @@ public class TcpProxyServer extends TcpNettyServer {
 //                .addStopListeners(f -> log.info("tcp client stopped, remote: {}, success: {}", addr, f.isSuccess()))
                     .start(f ->
                         log.info("tcp client shadow started, reality: {}, shadow: {}, success: {}"
-                            , realityChannel.remoteAddress()
-                            , addr
-                            , f.isSuccess()
-                        ))
+                            , realityChannel.remoteAddress(), addr, f.isSuccess())
+                    )
             )
             .filter(Objects::nonNull)
             .collect(Collectors.toList());
@@ -152,10 +151,8 @@ public class TcpProxyServer extends TcpNettyServer {
       if (clients != null) {
         clients.forEach(c ->
             c.stop(f ->
-                log.info("tcp client shadow stopped, reality: {}, shadow: {}, success: {}"
-                    , realityChannel.remoteAddress()
-                    , c.remoteAddress()
-                    , f.isSuccess())
+                log.info("tcp client shadow stopped, reality: {}, shadow: {}"
+                    , realityChannel.remoteAddress(), c.remoteAddress())
             )
         );
       }

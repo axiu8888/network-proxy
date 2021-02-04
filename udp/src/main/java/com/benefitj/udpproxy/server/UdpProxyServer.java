@@ -6,10 +6,7 @@ import com.benefitj.netty.log.Log4jNettyLogger;
 import com.benefitj.netty.log.NettyLogger;
 import com.benefitj.netty.server.UdpNettyServer;
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelInitializer;
+import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.util.AttributeKey;
@@ -43,6 +40,7 @@ public class UdpProxyServer extends UdpNettyServer {
    * 客户端
    */
   private final AttributeKey<List<UdpClient>> clientsKey = AttributeKey.valueOf("clientsKey");
+  private final AttributeKey<EventLoopGroup> groupKey = AttributeKey.valueOf("groupKey");
 
   @Autowired
   public UdpProxyServer(UdpConfig conf) {
@@ -115,14 +113,13 @@ public class UdpProxyServer extends UdpNettyServer {
                 .group(group)
                 .remoteAddress(addr)
                 .start(f ->
-                    log.info("udp client proxy started, remote: {}, success: {}"
-                        , addr
-                        , f.isSuccess()
-                    )
+                    log.info("udp client shadow started, reality: {}, shadow: {}, success: {}"
+                        , realityChannel.remoteAddress(), addr, f.isSuccess())
                 )
             )
             .collect(Collectors.toList());
         realityChannel.attr(clientsKey).set(clients);
+        realityChannel.attr(groupKey).set(group);
       }
     }
   }
@@ -130,19 +127,23 @@ public class UdpProxyServer extends UdpNettyServer {
   /**
    * 客户端下线
    *
-   * @param channel
+   * @param realityChannel
    */
-  protected void onClientChannelInactive(Channel channel) {
+  protected void onClientChannelInactive(Channel realityChannel) {
     synchronized (UdpProxyServer.this) {
-      List<UdpClient> clients = channel.attr(clientsKey).getAndSet(null);
+      List<UdpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
       if (clients != null) {
-        clients.forEach(c ->
-            c.stop(f ->
-                log.info("udp client proxy stopped, remote: {}, success: {}"
-                    , c.remoteAddress()
-                    , f.isSuccess())
-            )
-        );
+        clients.forEach(c -> {
+          try {
+            c.closeServeChannel();
+          } catch (Exception ignore) {
+            /* ! */
+          } finally {
+            log.info("udp client shadow stopped, reality: {}, shadow: {}"
+                , realityChannel.remoteAddress(), c.remoteAddress());
+          }
+        });
+        realityChannel.attr(groupKey).getAndSet(null).shutdownGracefully();
       }
     }
   }
