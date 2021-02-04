@@ -1,0 +1,6 @@
+rootProject.name = 'network-proxy'
+
+
+include ":commons"
+
+include ":udp", ":tcp"

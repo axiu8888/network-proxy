@@ -1,0 +1,1 @@
+java -jar udp-proxy.jar -Xdebug -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=15005 --spring.config.location=application.properties
