@@ -57,7 +57,7 @@ public class TcpProxyServer extends TcpNettyServer {
 
   @Override
   public TcpNettyServer useDefaultConfig() {
-    this.handler(new LoggingHandler(LogLevel.INFO));
+    //this.handler(new LoggingHandler(LogLevel.INFO));
     this.childHandler(new ChannelInitializer<Channel>() {
       @Override
       protected void initChannel(Channel ch) throws Exception {

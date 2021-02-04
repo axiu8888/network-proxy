@@ -5,9 +5,11 @@ plugins {
 	id 'maven'
 }
 
-group = 'com.benefitj'
 version = ''
-//version = '1.0-SNAPSHOT'
+
+jar {
+	archivesBaseName = "tcp-proxy"
+}
 
 configurations {
 	developmentOnly

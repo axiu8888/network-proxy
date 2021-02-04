@@ -5,9 +5,11 @@ plugins {
 	id 'maven'
 }
 
-group = 'udp-proxy'
 version = ''
-//version = '1.0-SNAPSHOT'
+
+jar {
+	archivesBaseName = "udp-proxy"
+}
 
 configurations {
 	developmentOnly

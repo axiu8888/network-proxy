@@ -7,8 +7,7 @@ confName=$(ls | grep application. | sort -rn)
 confFile=$(echo $confName|cut -d ' ' -f1)
 
 java -jar \
-  -Duser.timezone=GMT+08 \
-  -Xdebug -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=15001   \
   $name \
   --spring.config.location=$confFile \
-  > ./$(echo "$name" | cut -f 1 -d '.').log
+#  > ./$(echo "$name" | cut -f 1 -d '.').log
+  > ./trace.log
