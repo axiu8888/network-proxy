@@ -11,8 +11,8 @@ import org.springframework.stereotype.Component;
 @Setter
 @Getter
 @Component
-@ConfigurationProperties(prefix = "udp.proxy")
-public class UdpConfig {
+@ConfigurationProperties(prefix = "udp")
+public class UdpOptions {
   /**
    * 本地监听端口
    */

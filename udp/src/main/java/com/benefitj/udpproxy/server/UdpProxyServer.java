@@ -1,6 +1,7 @@
 package com.benefitj.udpproxy.server;
 
 import com.benefitj.core.HexUtils;
+import com.benefitj.netty.client.UdpNettyClient;
 import com.benefitj.netty.handler.*;
 import com.benefitj.netty.log.Log4jNettyLogger;
 import com.benefitj.netty.log.NettyLogger;
@@ -17,6 +18,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.net.InetSocketAddress;
+import java.net.PortUnreachableException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -31,7 +33,7 @@ public class UdpProxyServer extends UdpNettyServer {
     NettyLogger.INSTANCE.setLogger(new Log4jNettyLogger());
   }
 
-  private UdpConfig conf;
+  private UdpOptions options;
   /**
    * 远程主机地址
    */
@@ -43,16 +45,16 @@ public class UdpProxyServer extends UdpNettyServer {
   private final AttributeKey<EventLoopGroup> groupKey = AttributeKey.valueOf("groupKey");
 
   @Autowired
-  public UdpProxyServer(UdpConfig conf) {
-    this.conf = conf;
-    this.remoteServers = Collections.synchronizedList(Arrays.stream(getConf().getRemotes())
+  public UdpProxyServer(UdpOptions options) {
+    this.options = options;
+    this.remoteServers = Collections.synchronizedList(Arrays.stream(getOptions().getRemotes())
         .filter(StringUtils::isNotBlank)
         .map(s -> s.split(":"))
         .map(split -> new InetSocketAddress(split[0], Integer.parseInt(split[1])))
         .collect(Collectors.toList()));
     // 超时下线
-    this.readerTimeout(conf.getReaderTimeout());
-    this.writerTimeout(conf.getWriterTimeout());
+    this.readerTimeout(options.getReaderTimeout());
+    this.writerTimeout(options.getWriterTimeout());
   }
 
   @Override
@@ -74,10 +76,10 @@ public class UdpProxyServer extends UdpNettyServer {
               if (clients != null) {
                 clients.forEach(client -> onSendRequest(client.getServeChannel(), handler, ctx, msg));
               } else {
-                int size = Math.min(msg.content().readableBytes(), conf.getPrintRequestSize());
+                int size = Math.min(msg.content().readableBytes(), options.getPrintRequestSize());
                 log.warn("udp clients is empty, clientAddr: {}, remotes: {}, data: {}"
                     , ctx.channel().remoteAddress()
-                    , conf.getRemotes()
+                    , options.getRemotes()
                     , HexUtils.bytesToHex(handler.copyAndReset(msg, size))
                 );
               }
@@ -163,8 +165,8 @@ public class UdpProxyServer extends UdpNettyServer {
     InetSocketAddress recipient = (InetSocketAddress) shadowChannel.remoteAddress();
     ByteBuf content = msg.content();
     DatagramPacket packet = new DatagramPacket(content.copy(), recipient);
-    if (getConf().isPrintRequest()) {
-      int size = Math.min(getConf().getPrintRequestSize(), content.readableBytes());
+    if (getOptions().isPrintRequest()) {
+      int size = Math.min(getOptions().getPrintRequestSize(), content.readableBytes());
       byte[] data = handler.copyAndReset(content, size);
       shadowChannel.writeAndFlush(packet).addListener(f ->
           log.info("request reality: {}, shadow: {}, active: {}, data[{}]: {}, success: {}"
@@ -194,8 +196,8 @@ public class UdpProxyServer extends UdpNettyServer {
                                 DatagramPacket msg) {
     ByteBuf content = msg.content();
     DatagramPacket packet = new DatagramPacket(content.copy(), (InetSocketAddress) realityChannel.remoteAddress());
-    if (getConf().isPrintResponse()) {
-      int size = Math.min(getConf().getPrintResponseSize(), content.readableBytes());
+    if (getOptions().isPrintResponse()) {
+      int size = Math.min(getOptions().getPrintResponseSize(), content.readableBytes());
       byte[] data = handler.copyAndReset(content, size);
       realityChannel.writeAndFlush(packet).addListener(f ->
           log.info("response reality: {}, shadow: {}, active: {}, data[{}]: {}, success: {}"
@@ -216,11 +218,59 @@ public class UdpProxyServer extends UdpNettyServer {
     return super.stop(listeners);
   }
 
-  public UdpConfig getConf() {
-    return conf;
+  public UdpOptions getOptions() {
+    return options;
   }
 
-  public void setConf(UdpConfig conf) {
-    this.conf = conf;
+  public void setOptions(UdpOptions options) {
+    this.options = options;
   }
+
+  /**
+   * UDP客户端
+   */
+  public static class UdpClient extends UdpNettyClient {
+
+    private ByteBufCopyInboundHandler<DatagramPacket> inboundHandler;
+
+    public UdpClient() {
+    }
+
+    public UdpClient setInboundHandler(ByteBufCopyInboundHandler<DatagramPacket> inboundHandler) {
+      this.inboundHandler = inboundHandler;
+      return this;
+    }
+
+    public ByteBufCopyInboundHandler<DatagramPacket> getInboundHandler() {
+      return inboundHandler;
+    }
+
+    @Override
+    public UdpNettyClient useDefaultConfig() {
+      this.useLinuxNativeEpoll(false);
+      this.handler(new ChannelInitializer<Channel>() {
+        @Override
+        protected void initChannel(Channel ch) throws Exception {
+          ch.pipeline()
+              .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) ->
+                  log.info("udp client active state change: {}, remote: {}", state, ch.remoteAddress())))
+              .addLast(getInboundHandler())
+              .addLast(new ChannelInboundHandlerAdapter() {
+                @Override
+                public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+                  if (cause instanceof PortUnreachableException) {
+                    log.error("PortUnreachableException: " + ctx.channel().remoteAddress() + ", active: " + ctx.channel().isActive());
+                  } else {
+                    ctx.fireExceptionCaught(cause);
+                  }
+                }
+              })
+          ;
+        }
+      });
+      return super.useDefaultConfig();
+    }
+
+  }
+
 }

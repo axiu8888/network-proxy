@@ -11,8 +11,8 @@ import org.springframework.stereotype.Component;
 @Setter
 @Getter
 @Component
-@ConfigurationProperties(prefix = "tcp.proxy")
-public class TcpConfig {
+@ConfigurationProperties(prefix = "tcp")
+public class TcpOptions {
   /**
    * 本地监听端口
    */

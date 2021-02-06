@@ -1,6 +1,7 @@
 package com.benefitj.tcpproxy.server;
 
 import com.benefitj.core.HexUtils;
+import com.benefitj.netty.client.TcpNettyClient;
 import com.benefitj.netty.handler.*;
 import com.benefitj.netty.log.Log4jNettyLogger;
 import com.benefitj.netty.log.NettyLogger;
@@ -20,6 +21,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.net.InetSocketAddress;
+import java.net.PortUnreachableException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -36,7 +38,7 @@ public class TcpProxyServer extends TcpNettyServer {
     NettyLogger.INSTANCE.setLogger(new Log4jNettyLogger());
   }
 
-  private TcpConfig conf;
+  private TcpOptions options;
   /**
    * 远程主机地址
    */
@@ -47,9 +49,9 @@ public class TcpProxyServer extends TcpNettyServer {
   private final AttributeKey<List<TcpClient>> clientsKey = AttributeKey.valueOf("clientsKey");
 
   @Autowired
-  public TcpProxyServer(TcpConfig conf) {
-    this.conf = conf;
-    this.remoteServers = Collections.synchronizedList(Arrays.stream(getConf().getRemotes())
+  public TcpProxyServer(TcpOptions options) {
+    this.options = options;
+    this.remoteServers = Collections.synchronizedList(Arrays.stream(getOptions().getRemotes())
         .filter(StringUtils::isNotBlank)
         .map(s -> s.split(":"))
         .map(split -> new InetSocketAddress(split[0], Integer.parseInt(split[1])))
@@ -64,7 +66,7 @@ public class TcpProxyServer extends TcpNettyServer {
       protected void initChannel(Channel ch) throws Exception {
         ch.pipeline()
             .addLast(ChannelShutdownEventHandler.INSTANCE)
-            .addLast(new IdleStateHandler(conf.getReaderTimeout(), conf.getWriterTimeout(), 10, TimeUnit.SECONDS))
+            .addLast(new IdleStateHandler(options.getReaderTimeout(), options.getWriterTimeout(), 10, TimeUnit.SECONDS))
             .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) -> {
               //log.info("tcp active state change: {}, remote: {}", state, ctx.channel().remoteAddress());
               if (state == ActiveState.ACTIVE) {
@@ -84,10 +86,10 @@ public class TcpProxyServer extends TcpNettyServer {
                   }*/
                 });
               } else {
-                int size = Math.min(msg.readableBytes(), conf.getPrintRequestSize());
+                int size = Math.min(msg.readableBytes(), options.getPrintRequestSize());
                 log.warn("tcp clients is empty, clientAddr: {}, remotes: {}, data: {}"
                     , ctx.channel().remoteAddress()
-                    , conf.getRemotes()
+                    , options.getRemotes()
                     , HexUtils.bytesToHex(handler.copyAndReset(msg, size))
                 );
               }
@@ -121,7 +123,7 @@ public class TcpProxyServer extends TcpNettyServer {
                         (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
                     .group(group)
                     .remoteAddress(addr)
-                    .autoReconnect(conf.getAutoReconnect(), conf.getReconnectDelay(), TimeUnit.SECONDS)
+                    .autoReconnect(options.getAutoReconnect(), options.getReconnectDelay(), TimeUnit.SECONDS)
 //                .addStartListeners(f -> log.info("tcp client started, remote: {}, success: {}", addr, f.isSuccess()))
 //                .addStopListeners(f -> log.info("tcp client stopped, remote: {}, success: {}", addr, f.isSuccess()))
                     .start(f ->
@@ -172,8 +174,8 @@ public class TcpProxyServer extends TcpNettyServer {
                                ChannelHandlerContext ctx,
                                ByteBuf msg) {
     ByteBuf copy = msg.copy();
-    if (getConf().isPrintRequest()) {
-      int size = Math.min(getConf().getPrintRequestSize(), msg.readableBytes());
+    if (getOptions().isPrintRequest()) {
+      int size = Math.min(getOptions().getPrintRequestSize(), msg.readableBytes());
       byte[] data = handler.copyAndReset(copy, size);
       shadowChannel.writeAndFlush(copy).addListener(f ->
           log.info("request reality: {}, shadow: {}, active: {}, data[{}]: {}, success: {}"
@@ -202,8 +204,8 @@ public class TcpProxyServer extends TcpNettyServer {
                                 ChannelHandlerContext ctx,
                                 ByteBuf msg) {
     ByteBuf copy = msg.copy();
-    if (getConf().isPrintResponse()) {
-      int size = Math.min(getConf().getPrintResponseSize(), copy.readableBytes());
+    if (getOptions().isPrintResponse()) {
+      int size = Math.min(getOptions().getPrintResponseSize(), copy.readableBytes());
       byte[] data = handler.copyAndReset(copy, size);
       realityChannel.writeAndFlush(copy).addListener(f ->
           log.info("response reality: {}, shadow: {}, active: {}, data[{}]: {}, success: {}"
@@ -224,13 +226,61 @@ public class TcpProxyServer extends TcpNettyServer {
     return super.stop(listeners);
   }
 
-  public TcpConfig getConf() {
-    return conf;
+  public TcpOptions getOptions() {
+    return options;
   }
 
-  public void setConf(TcpConfig conf) {
-    this.conf = conf;
+  public void setOptions(TcpOptions options) {
+    this.options = options;
   }
 
+  /**
+   * TCP客户端
+   */
+  public static class TcpClient extends TcpNettyClient {
 
+    private ByteBufCopyInboundHandler<ByteBuf> inboundHandler;
+
+    public TcpClient() {
+    }
+
+    public TcpClient setInboundHandler(ByteBufCopyInboundHandler<ByteBuf> inboundHandler) {
+      this.inboundHandler = inboundHandler;
+      return this;
+    }
+
+    public ByteBufCopyInboundHandler<ByteBuf> getInboundHandler() {
+      return inboundHandler;
+    }
+
+    @Override
+    public TcpNettyClient useDefaultConfig() {
+      this.useLinuxNativeEpoll(false);
+      // 监听
+      this.handler(new ChannelInitializer<Channel>() {
+        @Override
+        protected void initChannel(Channel ch) throws Exception {
+          ch.pipeline()
+              .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) ->
+                  log.info("tcp client active change, state: {}, remote: {}", state, ch.remoteAddress())))
+              .addLast(getInboundHandler())
+              .addLast(new ChannelInboundHandlerAdapter() {
+                @Override
+                public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+                  if (cause instanceof PortUnreachableException) {
+                    Channel ch = ctx.channel();
+                    log.error("PortUnreachableException: " + ch.remoteAddress() + ", active: " + ch.isActive());
+                  } else {
+                    log.warn("exceptionCaught: {}", cause.getMessage());
+                    //ctx.fireExceptionCaught(cause);
+                  }
+                }
+              })
+          ;
+        }
+      });
+      return super.useDefaultConfig();
+    }
+
+  }
 }

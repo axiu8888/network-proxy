@@ -16,19 +16,19 @@ import java.util.concurrent.TimeUnit;
 public class ProxySwitcher {
 
   @Autowired
-  private UdpConfig conf;
+  private UdpOptions options;
   @Autowired
   private UdpProxyServer server;
 
   @EventListener
   public void onAppStart(ApplicationReadyEvent event) {
     try {
-      Integer port = conf.getPort();
+      Integer port = options.getPort();
       if (port == null) {
         throw new IllegalStateException("本地监听端口不能为空!");
       }
 
-      String[] remotes = conf.getRemotes();
+      String[] remotes = options.getRemotes();
       if (remotes == null || remotes.length < 1) {
         throw new IllegalStateException("远程主机地址不能为空!");
       }
@@ -36,7 +36,7 @@ public class ProxySwitcher {
       server.localAddress(port);
       server.start(f ->
           log.info("udp proxy started, local port: {}, remotes: {}, success: {}"
-              , conf.getPort()
+              , options.getPort()
               , Arrays.toString(remotes)
               , f.isSuccess()
           )
@@ -54,8 +54,8 @@ public class ProxySwitcher {
     try {
       server.stop(f ->
           log.info("udp proxy stopped, local port: {}, remotes: {}, success: {}"
-              , conf.getPort()
-              , Arrays.toString(conf.getRemotes())
+              , options.getPort()
+              , Arrays.toString(options.getRemotes())
               , f.isSuccess()
           )
       );
