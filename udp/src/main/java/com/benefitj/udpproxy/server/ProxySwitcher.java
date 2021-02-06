@@ -43,7 +43,7 @@ public class ProxySwitcher {
       );
     } catch (Exception e) {
       log.error("throws: " + e.getMessage(), e);
-      // 10秒后停止
+      // 5秒后停止
       EventLoop.single().schedule(() ->
           System.exit(0), 5, TimeUnit.SECONDS);
     }

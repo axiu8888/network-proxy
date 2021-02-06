@@ -3,11 +3,11 @@ package com.benefitj.udpproxy.server;
 import com.benefitj.netty.client.UdpNettyClient;
 import com.benefitj.netty.handler.ActiveChangeChannelHandler;
 import com.benefitj.netty.handler.ByteBufCopyInboundHandler;
-import io.netty.bootstrap.Bootstrap;
-import io.netty.channel.*;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelInitializer;
 import io.netty.channel.socket.DatagramPacket;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.GenericFutureListener;
 
 import java.net.PortUnreachableException;
 
@@ -54,17 +54,6 @@ public class UdpClient extends UdpNettyClient {
       }
     });
     return super.useDefaultConfig();
-  }
-
-  @Override
-  protected ChannelFuture startOnly(Bootstrap bootstrap,
-                                    GenericFutureListener<? extends Future<Void>>... listeners) {
-    return bootstrap.connect().syncUninterruptibly().addListeners(listeners);
-  }
-
-  @Override
-  public UdpNettyClient stop(GenericFutureListener<? extends Future<Void>>... listeners) {
-    return super.stop(listeners);
   }
 
 }
