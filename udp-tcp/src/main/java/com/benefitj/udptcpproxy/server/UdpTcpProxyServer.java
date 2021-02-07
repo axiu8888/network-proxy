@@ -52,18 +52,19 @@ public class UdpTcpProxyServer extends UdpNettyServer {
         .map(s -> s.split(":"))
         .map(split -> new InetSocketAddress(split[0], Integer.parseInt(split[1])))
         .collect(Collectors.toList()));
-    // 超时下线
-    this.readerTimeout(options.getReaderTimeout());
-    this.writerTimeout(options.getWriterTimeout());
   }
 
   @Override
   public UdpNettyServer useDefaultConfig() {
+    UdpTcpOptions ops = getOptions();
+    this.useLinuxNativeEpoll(false);
     this.childHandler(new ChannelInitializer<Channel>() {
       @Override
       protected void initChannel(Channel ch) throws Exception {
         ch.pipeline()
-            .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) -> {
+            .addLast(IdleStateEventHandler.newIdle(ops.getReaderTimeout(), ops.getWriterTimeout(), 0, TimeUnit.SECONDS))
+            .addLast(IdleStateEventHandler.newCloseHandler())
+            .addLast(ActiveChannelHandler.newHandler((handler, ctx, state) -> {
               //log.info("udp active state change: {}, remote: {}", state, ctx.channel().remoteAddress());
               if (state == ActiveState.ACTIVE) {
                 onClientChannelActive(ctx.channel());
@@ -76,10 +77,10 @@ public class UdpTcpProxyServer extends UdpNettyServer {
               if (clients != null) {
                 clients.forEach(client -> onSendRequest(client.getServeChannel(), handler, ctx, msg));
               } else {
-                int size = Math.min(msg.content().readableBytes(), options.getPrintRequestSize());
+                int size = Math.min(msg.content().readableBytes(), ops.getPrintRequestSize());
                 log.warn("[udp-tcp] clients is empty, clientAddr: {}, remotes: {}, data: {}"
                     , ctx.channel().remoteAddress()
-                    , options.getRemotes()
+                    , ops.getRemotes()
                     , HexUtils.bytesToHex(handler.copyAndReset(msg, size))
                 );
               }
@@ -103,27 +104,25 @@ public class UdpTcpProxyServer extends UdpNettyServer {
    * @param realityChannel
    */
   protected void onClientChannelActive(Channel realityChannel) {
-    synchronized (UdpTcpProxyServer.this) {
-      if (!realityChannel.hasAttr(clientsKey)) {
-        // 创建UDP客户端
-        final UdpTcpOptions ops = getOptions();
-        NioEventLoopGroup group = new NioEventLoopGroup(1);
-        List<UdpTcpClient> clients = this.remotes.stream()
-            .map(addr -> (UdpTcpClient) new UdpTcpClient()
-                // 处理响应的数据
-                .setInboundHandler(BiConsumerInboundHandler.newByteBufHandler(
-                    (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
-                .group(group)
-                .remoteAddress(addr)
-                .autoReconnect(ops.getAutoReconnect(), ops.getReconnectDelay(), TimeUnit.SECONDS)
-                .start(f ->
-                    log.info("[udp-tcp] client shadow started, reality: {}, shadow: {}, success: {}"
-                        , realityChannel.remoteAddress(), addr, f.isSuccess())
-                )
-            )
-            .collect(Collectors.toList());
-        realityChannel.attr(clientsKey).set(clients);
-      }
+    if (!realityChannel.hasAttr(clientsKey)) {
+      // 创建UDP客户端
+      final UdpTcpOptions ops = getOptions();
+      NioEventLoopGroup group = new NioEventLoopGroup(1);
+      List<UdpTcpClient> clients = this.remotes.stream()
+          .map(addr -> (UdpTcpClient) new UdpTcpClient()
+              // 处理响应的数据
+              .setInboundHandler(BiConsumerInboundHandler.newByteBufHandler(
+                  (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
+              .group(group)
+              .remoteAddress(addr)
+              .autoReconnect(ops.getAutoReconnect(), ops.getReconnectDelay(), TimeUnit.SECONDS)
+              .start(f ->
+                  log.info("[udp-tcp] client shadow started, reality: {}, shadow: {}, success: {}"
+                      , realityChannel.remoteAddress(), addr, f.isSuccess())
+              )
+          )
+          .collect(Collectors.toList());
+      realityChannel.attr(clientsKey).set(clients);
     }
   }
 
@@ -133,15 +132,13 @@ public class UdpTcpProxyServer extends UdpNettyServer {
    * @param realityChannel
    */
   protected void onClientChannelInactive(Channel realityChannel) {
-    synchronized (UdpTcpProxyServer.this) {
-      List<UdpTcpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
-      if (clients != null) {
-        clients.forEach(c ->
-            c.stop(f ->
-                log.info("[udp-tcp] client shadow stopped, reality: {}, shadow: {}"
-                    , realityChannel.remoteAddress(), c.remoteAddress()))
-        );
-      }
+    List<UdpTcpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
+    if (clients != null) {
+      clients.forEach(c ->
+          c.stop(f ->
+              log.info("[udp-tcp] client shadow stopped, reality: {}, shadow: {}"
+                  , realityChannel.remoteAddress(), c.remoteAddress()))
+      );
     }
   }
 
@@ -259,7 +256,7 @@ public class UdpTcpProxyServer extends UdpNettyServer {
         @Override
         protected void initChannel(Channel ch) throws Exception {
           ch.pipeline()
-              .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) ->
+              .addLast(ActiveChannelHandler.newHandler((handler, ctx, state) ->
                   log.info("[udp-[tcp]] client active change, state: {}, remote: {}", state, ch.remoteAddress())))
               .addLast(getInboundHandler())
               .addLast(new ChannelInboundHandlerAdapter() {

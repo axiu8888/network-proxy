@@ -17,10 +17,14 @@ public class TcpOptions extends ProxyOptions {
   /**
    * 是否自动重连，对于部分连接，重连可能会导致错误
    */
-  private Boolean autoReconnect = false;
+  private boolean autoReconnect = false;
   /**
    * 自动重连的时间
    */
   private Integer reconnectDelay = 3;
+  /**
+   * 是否快速失败
+   */
+  private boolean fastFailover = false;
 
 }

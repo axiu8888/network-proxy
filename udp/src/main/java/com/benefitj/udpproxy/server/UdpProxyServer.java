@@ -23,6 +23,7 @@ import java.net.PortUnreachableException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -53,19 +54,19 @@ public class UdpProxyServer extends UdpNettyServer {
         .map(s -> s.split(":"))
         .map(split -> new InetSocketAddress(split[0], Integer.parseInt(split[1])))
         .collect(Collectors.toList()));
-    // 超时下线
-    this.readerTimeout(options.getReaderTimeout());
-    this.writerTimeout(options.getWriterTimeout());
   }
 
   @Override
   public UdpNettyServer useDefaultConfig() {
+    UdpOptions ops = getOptions();
+    this.useLinuxNativeEpoll(false);
     this.childHandler(new ChannelInitializer<Channel>() {
       @Override
       protected void initChannel(Channel ch) throws Exception {
         ch.pipeline()
-            .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) -> {
-              //log.info("udp active state change: {}, remote: {}", state, ctx.channel().remoteAddress());
+            .addLast(IdleStateEventHandler.newIdle(ops.getReaderTimeout(), ops.getWriterTimeout(), 0, TimeUnit.SECONDS))
+            .addLast(IdleStateEventHandler.newCloseHandler())
+            .addLast(ActiveChannelHandler.newHandler((handler, ctx, state) -> {
               if (state == ActiveState.ACTIVE) {
                 onClientChannelActive(ctx.channel());
               } else {
@@ -75,12 +76,12 @@ public class UdpProxyServer extends UdpNettyServer {
             .addLast(BiConsumerInboundHandler.newDatagramHandler((handler, ctx, msg) -> {
               List<UdpClient> clients = ctx.channel().attr(clientsKey).get();
               if (clients != null) {
-                clients.forEach(client -> onSendRequest(client.getServeChannel(), handler, ctx, msg));
+                clients.forEach(c -> onSendRequest(c.getServeChannel(), handler, ctx, msg));
               } else {
-                int size = Math.min(msg.content().readableBytes(), options.getPrintRequestSize());
+                int size = Math.min(msg.content().readableBytes(), ops.getPrintRequestSize());
                 log.warn("[udp] clients is empty, clientAddr: {}, remotes: {}, data: {}"
                     , ctx.channel().remoteAddress()
-                    , options.getRemotes()
+                    , ops.getRemotes()
                     , HexUtils.bytesToHex(handler.copyAndReset(msg, size))
                 );
               }
@@ -104,26 +105,24 @@ public class UdpProxyServer extends UdpNettyServer {
    * @param realityChannel
    */
   protected void onClientChannelActive(Channel realityChannel) {
-    synchronized (UdpProxyServer.this) {
-      if (!realityChannel.hasAttr(clientsKey)) {
-        // 创建UDP客户端
-        NioEventLoopGroup group = new NioEventLoopGroup(1);
-        List<UdpClient> clients = this.remotes.stream()
-            .map(addr -> (UdpClient) new UdpClient()
-                // 处理响应的数据
-                .setInboundHandler(BiConsumerInboundHandler.newDatagramHandler(
-                    (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
-                .group(group)
-                .remoteAddress(addr)
-                .start(f ->
-                    log.info("[udp] client shadow started, reality: {}, shadow: {}, success: {}"
-                        , realityChannel.remoteAddress(), addr, f.isSuccess())
-                )
-            )
-            .collect(Collectors.toList());
-        realityChannel.attr(clientsKey).set(clients);
-        realityChannel.attr(groupKey).set(group);
-      }
+    if (!realityChannel.hasAttr(clientsKey)) {
+      // 创建UDP客户端
+      NioEventLoopGroup group = new NioEventLoopGroup(1);
+      List<UdpClient> clients = this.remotes.stream()
+          .map(addr -> (UdpClient) new UdpClient()
+              // 处理响应的数据
+              .setInboundHandler(BiConsumerInboundHandler.newDatagramHandler(
+                  (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
+              .group(group)
+              .remoteAddress(addr)
+              .start(f ->
+                  log.info("[udp] client shadow started, reality: {}, shadow: {}, success: {}"
+                      , realityChannel.remoteAddress(), addr, f.isSuccess())
+              )
+          )
+          .collect(Collectors.toList());
+      realityChannel.attr(clientsKey).set(clients);
+      realityChannel.attr(groupKey).set(group);
     }
   }
 
@@ -133,21 +132,19 @@ public class UdpProxyServer extends UdpNettyServer {
    * @param realityChannel
    */
   protected void onClientChannelInactive(Channel realityChannel) {
-    synchronized (UdpProxyServer.this) {
-      List<UdpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
-      if (clients != null) {
-        clients.forEach(c -> {
-          try {
-            c.closeServeChannel();
-          } catch (Exception ignore) {
-            /* ! */
-          } finally {
-            log.info("[udp] client shadow stopped, reality: {}, shadow: {}"
-                , realityChannel.remoteAddress(), c.remoteAddress());
-          }
-        });
-        realityChannel.attr(groupKey).getAndSet(null).shutdownGracefully();
-      }
+    List<UdpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
+    if (clients != null) {
+      clients.forEach(c -> {
+        try {
+          c.closeServeChannel();
+        } catch (Exception ignore) {
+          /* ! */
+        } finally {
+          log.info("[udp] client shadow stopped, reality: {}, shadow: {}"
+              , realityChannel.remoteAddress(), c.remoteAddress());
+        }
+      });
+      realityChannel.attr(groupKey).getAndSet(null).shutdownGracefully();
     }
   }
 
@@ -253,7 +250,7 @@ public class UdpProxyServer extends UdpNettyServer {
         @Override
         protected void initChannel(Channel ch) throws Exception {
           ch.pipeline()
-              .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) ->
+              .addLast(ActiveChannelHandler.newHandler((handler, ctx, state) ->
                   log.info("[udp] client active state change: {}, remote: {}", state, ch.remoteAddress())))
               .addLast(getInboundHandler())
               .addLast(new ChannelInboundHandlerAdapter() {

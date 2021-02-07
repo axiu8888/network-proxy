@@ -12,8 +12,6 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.handler.timeout.IdleState;
-import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -26,7 +24,6 @@ import java.net.PortUnreachableException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -61,15 +58,16 @@ public class TcpProxyServer extends TcpNettyServer {
 
   @Override
   public TcpNettyServer useDefaultConfig() {
-    //this.handler(new LoggingHandler(LogLevel.INFO));
+    this.useLinuxNativeEpoll(false);
     this.childHandler(new ChannelInitializer<Channel>() {
       @Override
       protected void initChannel(Channel ch) throws Exception {
+        final TcpOptions ops = TcpProxyServer.this.options;
         ch.pipeline()
             .addLast(ChannelShutdownEventHandler.INSTANCE)
-            .addLast(new IdleStateHandler(options.getReaderTimeout(), options.getWriterTimeout(), 10, TimeUnit.SECONDS))
-            .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) -> {
-              //log.info("tcp active state change: {}, remote: {}", state, ctx.channel().remoteAddress());
+            .addLast(IdleStateEventHandler.newIdle(ops.getReaderTimeout(), ops.getWriterTimeout(), 0, TimeUnit.SECONDS))
+            .addLast(IdleStateEventHandler.newCloseHandler())
+            .addLast(ActiveChannelHandler.newHandler((handler, ctx, state) -> {
               if (state == ActiveState.ACTIVE) {
                 onClientChannelActive(ctx.channel());
               } else {
@@ -87,10 +85,10 @@ public class TcpProxyServer extends TcpNettyServer {
                   }*/
                 });
               } else {
-                int size = Math.min(msg.readableBytes(), options.getPrintRequestSize());
+                int size = Math.min(msg.readableBytes(), ops.getPrintRequestSize());
                 log.warn("tcp clients is empty, clientAddr: {}, remotes: {}, data: {}"
                     , ctx.channel().remoteAddress()
-                    , options.getRemotes()
+                    , ops.getRemotes()
                     , HexUtils.bytesToHex(handler.copyAndReset(msg, size))
                 );
               }
@@ -113,33 +111,31 @@ public class TcpProxyServer extends TcpNettyServer {
    * @param realityChannel
    */
   protected void onClientChannelActive(Channel realityChannel) {
-    synchronized (TcpProxyServer.this) {
-      if (!realityChannel.hasAttr(clientsKey)) {
-        // 创建TCP客户端
-        NioEventLoopGroup group = new NioEventLoopGroup(1);
-        List<TcpClient> clients = this.remotes.stream()
-            .map(addr -> (TcpClient) new TcpClient(getOptions())
-                    // 处理响应的数据
-                    .setInboundHandler(BiConsumerInboundHandler.newByteBufHandler(
-                        (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
-                    .group(group)
-                    .remoteAddress(addr)
-                    .autoReconnect(options.getAutoReconnect(), options.getReconnectDelay(), TimeUnit.SECONDS)
-//                .addStartListeners(f -> log.info("tcp client started, remote: {}, success: {}", addr, f.isSuccess()))
-//                .addStopListeners(f -> log.info("tcp client stopped, remote: {}, success: {}", addr, f.isSuccess()))
-                    .start(f ->
-                        log.info("[tcp] client shadow started, reality: {}, shadow: {}, success: {}"
-                            , realityChannel.remoteAddress(), addr, f.isSuccess())
-                    )
-            )
-            .filter(Objects::nonNull)
-            .collect(Collectors.toList());
-        realityChannel.attr(clientsKey).set(clients);
-
-        if (clients.isEmpty()) {
-          group.shutdownGracefully();
-        }
-      }
+    if (!realityChannel.hasAttr(clientsKey)) {
+      // 创建TCP客户端
+      NioEventLoopGroup group = new NioEventLoopGroup(1);
+      TcpOptions ops = this.getOptions();
+      List<TcpClient> clients = this.remotes.stream()
+          .map(addr -> (TcpClient) new TcpClient()
+              .setActiveChannelHandler(ops.isFastFailover() ?
+                  ActiveChannelHandler.newHandler((handler, ctx, state) -> {
+                    if (state == ActiveState.INACTIVE && realityChannel.isActive()) {
+                      realityChannel.close();
+                    }
+                  }) : null)
+              // 处理响应的数据
+              .setInboundHandler(BiConsumerInboundHandler.newByteBufHandler(
+                  (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
+              .group(group)
+              .remoteAddress(addr)
+              .autoReconnect(ops.isAutoReconnect(), ops.getReconnectDelay(), TimeUnit.SECONDS)
+              .start(f ->
+                  log.info("[tcp] client shadow started, reality: {}, shadow: {}, success: {}"
+                      , realityChannel.remoteAddress(), addr, f.isSuccess())
+              )
+          )
+          .collect(Collectors.toList());
+      realityChannel.attr(clientsKey).set(clients);
     }
   }
 
@@ -149,16 +145,14 @@ public class TcpProxyServer extends TcpNettyServer {
    * @param realityChannel
    */
   protected void onClientChannelInactive(Channel realityChannel) {
-    synchronized (TcpProxyServer.this) {
-      List<TcpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
-      if (clients != null) {
-        clients.forEach(c ->
-            c.stop(f ->
-                log.info("[tcp] client shadow stopped, reality: {}, shadow: {}"
-                    , realityChannel.remoteAddress(), c.remoteAddress())
-            )
-        );
-      }
+    List<TcpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
+    if (clients != null) {
+      clients.forEach(c ->
+          c.stop(f ->
+              log.info("[tcp] client shadow stopped, reality: {}, shadow: {}"
+                  , realityChannel.remoteAddress(), c.remoteAddress())
+          )
+      );
     }
   }
 
@@ -241,10 +235,9 @@ public class TcpProxyServer extends TcpNettyServer {
   public static class TcpClient extends TcpNettyClient {
 
     private ByteBufCopyInboundHandler<ByteBuf> inboundHandler;
-    private TcpOptions options;
+    private ActiveChannelHandler activeChannelHandler;
 
-    public TcpClient(TcpOptions options) {
-      this.options = options;
+    public TcpClient() {
     }
 
     public TcpClient setInboundHandler(ByteBufCopyInboundHandler<ByteBuf> inboundHandler) {
@@ -256,6 +249,15 @@ public class TcpProxyServer extends TcpNettyServer {
       return inboundHandler;
     }
 
+    public ActiveChannelHandler getActiveChannelHandler() {
+      return activeChannelHandler;
+    }
+
+    public TcpClient setActiveChannelHandler(ActiveChannelHandler activeChannelHandler) {
+      this.activeChannelHandler = activeChannelHandler;
+      return this;
+    }
+
     @Override
     public TcpNettyClient useDefaultConfig() {
       this.useLinuxNativeEpoll(false);
@@ -263,17 +265,12 @@ public class TcpProxyServer extends TcpNettyServer {
       this.handler(new ChannelInitializer<Channel>() {
         @Override
         protected void initChannel(Channel ch) throws Exception {
+          ActiveChannelHandler acch = getActiveChannelHandler();
+          if (acch != null) {
+            ch.pipeline().addLast(acch);
+          }
           ch.pipeline()
-              .addLast(IdleStateEventHandler.newHandler(options.getReaderTimeout()
-                  , options.getWriterTimeout()
-                  , 0
-                  , (ctx, event) -> {
-                    if (event.state() == IdleState.READER_IDLE
-                        || event.state() == IdleState.WRITER_IDLE) {
-                      ctx.channel().close();
-                    }
-                  }))
-              .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) ->
+              .addLast(ActiveChannelHandler.newHandler((handler, ctx, state) ->
                   log.info("[tcp] client active change, state: {}, remote: {}", state, ch.remoteAddress())))
               .addLast(getInboundHandler())
               .addLast(new ChannelInboundHandlerAdapter() {

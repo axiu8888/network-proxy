@@ -11,7 +11,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.DatagramPacket;
-import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -24,7 +23,6 @@ import java.net.PortUnreachableException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -59,16 +57,16 @@ public class TcpUdpProxyServer extends TcpNettyServer {
 
   @Override
   public TcpNettyServer useDefaultConfig() {
-    //this.handler(new LoggingHandler(LogLevel.INFO));
+    this.useLinuxNativeEpoll(false);
     this.childHandler(new ChannelInitializer<Channel>() {
       @Override
       protected void initChannel(Channel ch) throws Exception {
         final TcpUdpOptions ops = getOptions();
         ch.pipeline()
             .addLast(ChannelShutdownEventHandler.INSTANCE)
-            .addLast(new IdleStateHandler(ops.getReaderTimeout(), ops.getWriterTimeout(), 10, TimeUnit.SECONDS))
-            .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) -> {
-              //log.info("tcp active state change: {}, remote: {}", state, ctx.channel().remoteAddress());
+            .addLast(IdleStateEventHandler.newIdle(ops.getReaderTimeout(), ops.getWriterTimeout(), 0, TimeUnit.SECONDS))
+            .addLast(IdleStateEventHandler.newCloseHandler())
+            .addLast(ActiveChannelHandler.newHandler((handler, ctx, state) -> {
               if (state == ActiveState.ACTIVE) {
                 onClientChannelActive(ctx.channel());
               } else {
@@ -112,31 +110,25 @@ public class TcpUdpProxyServer extends TcpNettyServer {
    * @param realityChannel
    */
   protected void onClientChannelActive(Channel realityChannel) {
-    synchronized (TcpUdpProxyServer.this) {
-      if (!realityChannel.hasAttr(clientsKey)) {
-        // 创建TCP客户端
-        NioEventLoopGroup group = new NioEventLoopGroup(1);
-        List<TcpUdpClient> clients = this.remotes.stream()
-            .map(addr -> (TcpUdpClient) new TcpUdpClient()
-                    // 处理响应的数据
-                    .setInboundHandler(BiConsumerInboundHandler.newDatagramHandler(
-                        (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
-                    .group(group)
-                    .remoteAddress(addr)
-//                .addStartListeners(f -> log.info("tcp client started, remote: {}, success: {}", addr, f.isSuccess()))
-//                .addStopListeners(f -> log.info("tcp client stopped, remote: {}, success: {}", addr, f.isSuccess()))
-                    .start(f ->
-                        log.info("[tcp-udp] client shadow started, reality: {}, shadow: {}, success: {}"
-                            , realityChannel.remoteAddress(), addr, f.isSuccess())
-                    )
-            )
-            .filter(Objects::nonNull)
-            .collect(Collectors.toList());
-        realityChannel.attr(clientsKey).set(clients);
-
-        if (clients.isEmpty()) {
-          group.shutdownGracefully();
-        }
+    if (!realityChannel.hasAttr(clientsKey)) {
+      // 创建TCP客户端
+      NioEventLoopGroup group = new NioEventLoopGroup(1);
+      List<TcpUdpClient> clients = this.remotes.stream()
+          .map(addr -> (TcpUdpClient) new TcpUdpClient()
+              // 处理响应的数据
+              .setInboundHandler(BiConsumerInboundHandler.newDatagramHandler(
+                  (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
+              .group(group)
+              .remoteAddress(addr)
+              .start(f ->
+                  log.info("[tcp-udp] client shadow started, reality: {}, shadow: {}, success: {}"
+                      , realityChannel.remoteAddress(), addr, f.isSuccess())
+              )
+          )
+          .collect(Collectors.toList());
+      realityChannel.attr(clientsKey).set(clients);
+      if (clients.isEmpty()) {
+        group.shutdownGracefully();
       }
     }
   }
@@ -147,16 +139,14 @@ public class TcpUdpProxyServer extends TcpNettyServer {
    * @param realityChannel
    */
   protected void onClientChannelInactive(Channel realityChannel) {
-    synchronized (TcpUdpProxyServer.this) {
-      List<TcpUdpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
-      if (clients != null) {
-        clients.forEach(c ->
-            c.stop(f ->
-                log.info("[tcp-udp] client shadow stopped, reality: {}, shadow: {}"
-                    , realityChannel.remoteAddress(), c.remoteAddress())
-            )
-        );
-      }
+    List<TcpUdpClient> clients = realityChannel.attr(clientsKey).getAndSet(null);
+    if (clients != null) {
+      clients.forEach(c ->
+          c.stop(f ->
+              log.info("[tcp-udp] client shadow stopped, reality: {}, shadow: {}"
+                  , realityChannel.remoteAddress(), c.remoteAddress())
+          )
+      );
     }
   }
 
@@ -261,7 +251,7 @@ public class TcpUdpProxyServer extends TcpNettyServer {
         @Override
         protected void initChannel(Channel ch) throws Exception {
           ch.pipeline()
-              .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) ->
+              .addLast(ActiveChannelHandler.newHandler((handler, ctx, state) ->
                   log.info("[tcp-[udp]] client active change, state: {}, remote: {}", state, ch.remoteAddress())))
               .addLast(getInboundHandler())
               .addLast(new ChannelInboundHandlerAdapter() {

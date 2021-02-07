@@ -35,7 +35,7 @@ public class ProxySwitcher {
 
       server.localAddress(port);
       server.start(f ->
-          log.info("tcp proxy started, local port: {}, remotes: {}, success: {}"
+          log.info("[tcp-udp] proxy started, local port: {}, remotes: {}, success: {}"
               , options.getPort()
               , Arrays.toString(remotes)
               , f.isSuccess()
@@ -53,7 +53,7 @@ public class ProxySwitcher {
   public void onAppStop(ContextClosedEvent event) {
     try {
       server.stop(f ->
-          log.info("tcp proxy stopped, local port: {}, remotes: {}, success: {}"
+          log.info("[tcp-udp] proxy stopped, local port: {}, remotes: {}, success: {}"
               , options.getPort()
               , Arrays.toString(options.getRemotes())
               , f.isSuccess()
