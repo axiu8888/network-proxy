@@ -3,4 +3,4 @@ rootProject.name = 'network-proxy'
 
 include ":commons"
 
-include ":udp", ":tcp"
+include ":udp", ":tcp", "tcp-udp", "udp-tcp"

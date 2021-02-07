@@ -12,6 +12,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
@@ -42,7 +43,7 @@ public class TcpProxyServer extends TcpNettyServer {
   /**
    * 远程主机地址
    */
-  private final List<InetSocketAddress> remoteServers;
+  private final List<InetSocketAddress> remotes;
   /**
    * 客户端
    */
@@ -51,7 +52,7 @@ public class TcpProxyServer extends TcpNettyServer {
   @Autowired
   public TcpProxyServer(TcpOptions options) {
     this.options = options;
-    this.remoteServers = Collections.synchronizedList(Arrays.stream(getOptions().getRemotes())
+    this.remotes = Collections.synchronizedList(Arrays.stream(getOptions().getRemotes())
         .filter(StringUtils::isNotBlank)
         .map(s -> s.split(":"))
         .map(split -> new InetSocketAddress(split[0], Integer.parseInt(split[1])))
@@ -116,8 +117,8 @@ public class TcpProxyServer extends TcpNettyServer {
       if (!realityChannel.hasAttr(clientsKey)) {
         // 创建TCP客户端
         NioEventLoopGroup group = new NioEventLoopGroup(1);
-        List<TcpClient> clients = this.remoteServers.stream()
-            .map(addr -> (TcpClient) new TcpClient()
+        List<TcpClient> clients = this.remotes.stream()
+            .map(addr -> (TcpClient) new TcpClient(getOptions())
                     // 处理响应的数据
                     .setInboundHandler(BiConsumerInboundHandler.newByteBufHandler(
                         (rhandler, rctx, rmsg) -> onSendResponse(realityChannel, rhandler, rctx, rmsg)))
@@ -127,7 +128,7 @@ public class TcpProxyServer extends TcpNettyServer {
 //                .addStartListeners(f -> log.info("tcp client started, remote: {}, success: {}", addr, f.isSuccess()))
 //                .addStopListeners(f -> log.info("tcp client stopped, remote: {}, success: {}", addr, f.isSuccess()))
                     .start(f ->
-                        log.info("tcp client shadow started, reality: {}, shadow: {}, success: {}"
+                        log.info("[tcp] client shadow started, reality: {}, shadow: {}, success: {}"
                             , realityChannel.remoteAddress(), addr, f.isSuccess())
                     )
             )
@@ -153,7 +154,7 @@ public class TcpProxyServer extends TcpNettyServer {
       if (clients != null) {
         clients.forEach(c ->
             c.stop(f ->
-                log.info("tcp client shadow stopped, reality: {}, shadow: {}"
+                log.info("[tcp] client shadow stopped, reality: {}, shadow: {}"
                     , realityChannel.remoteAddress(), c.remoteAddress())
             )
         );
@@ -178,7 +179,7 @@ public class TcpProxyServer extends TcpNettyServer {
       int size = Math.min(getOptions().getPrintRequestSize(), msg.readableBytes());
       byte[] data = handler.copyAndReset(copy, size);
       shadowChannel.writeAndFlush(copy).addListener(f ->
-          log.info("request reality: {}, shadow: {}, active: {}, data[{}]: {}, success: {}"
+          log.info("[tcp] request reality: {}, shadow: {}, active: {}, data[{}]: {}, success: {}"
               , ctx.channel().remoteAddress()
               , shadowChannel.remoteAddress()
               , shadowChannel.isActive()
@@ -208,7 +209,7 @@ public class TcpProxyServer extends TcpNettyServer {
       int size = Math.min(getOptions().getPrintResponseSize(), copy.readableBytes());
       byte[] data = handler.copyAndReset(copy, size);
       realityChannel.writeAndFlush(copy).addListener(f ->
-          log.info("response reality: {}, shadow: {}, active: {}, data[{}]: {}, success: {}"
+          log.info("[tcp] response reality: {}, shadow: {}, active: {}, data[{}]: {}, success: {}"
               , realityChannel.remoteAddress()
               , ctx.channel().localAddress()
               , realityChannel.isActive()
@@ -240,8 +241,10 @@ public class TcpProxyServer extends TcpNettyServer {
   public static class TcpClient extends TcpNettyClient {
 
     private ByteBufCopyInboundHandler<ByteBuf> inboundHandler;
+    private TcpOptions options;
 
-    public TcpClient() {
+    public TcpClient(TcpOptions options) {
+      this.options = options;
     }
 
     public TcpClient setInboundHandler(ByteBufCopyInboundHandler<ByteBuf> inboundHandler) {
@@ -261,8 +264,17 @@ public class TcpProxyServer extends TcpNettyServer {
         @Override
         protected void initChannel(Channel ch) throws Exception {
           ch.pipeline()
+              .addLast(IdleStateEventHandler.newHandler(options.getReaderTimeout()
+                  , options.getWriterTimeout()
+                  , 0
+                  , (ctx, event) -> {
+                    if (event.state() == IdleState.READER_IDLE
+                        || event.state() == IdleState.WRITER_IDLE) {
+                      ctx.channel().close();
+                    }
+                  }))
               .addLast(ActiveChangeChannelHandler.newHandler((handler, ctx, state) ->
-                  log.info("tcp client active change, state: {}, remote: {}", state, ch.remoteAddress())))
+                  log.info("[tcp] client active change, state: {}, remote: {}", state, ch.remoteAddress())))
               .addLast(getInboundHandler())
               .addLast(new ChannelInboundHandlerAdapter() {
                 @Override
@@ -271,7 +283,7 @@ public class TcpProxyServer extends TcpNettyServer {
                     Channel ch = ctx.channel();
                     log.error("PortUnreachableException: " + ch.remoteAddress() + ", active: " + ch.isActive());
                   } else {
-                    log.warn("exceptionCaught: {}", cause.getMessage());
+                    log.warn("[tcp] exceptionCaught: {}", cause.getMessage());
                     //ctx.fireExceptionCaught(cause);
                   }
                 }
