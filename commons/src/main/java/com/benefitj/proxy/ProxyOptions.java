@@ -9,6 +9,9 @@ import lombok.Setter;
 @Setter
 @Getter
 public class ProxyOptions {
+
+  public static final String[] EMPTY = new String[0];
+
   /**
    * 本地监听端口
    */
@@ -16,7 +19,7 @@ public class ProxyOptions {
   /**
    * 远程主机地址，比如：192.168.1.100:8080
    */
-  private String[] remotes;
+  private String[] remotes = EMPTY;
   /**
    * 写入超时时间
    */
